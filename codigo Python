@@ -1,0 +1,28 @@
+from gaitpy.gait import Gaitpy
+
+raw_data = 'raw-data-path or pandas dataframe'
+sample_rate = 128 # hertz
+subject_height = 170 # centimeters
+
+#### Create an instance of Gaitpy ####
+gaitpy = Gaitpy(raw_data,                           # Raw data consisting of vertical acceleration from lumbar location and unix timestamps
+                sample_rate,                        # Sample rate of raw data (in Hertz)
+                v_acc_col_name='y',                 # Vertical acceleration column name
+                ts_col_name='timestamps',           # Timestamp column name
+                v_acc_units='m/s^2',                # Units of vertical acceleration
+                ts_units='ms',                      # Units of timestamps
+                flip=False)                         # If baseline data is at +1g or +9.8m/s^2, set flip=True
+
+#### Classify bouts of gait - Optional (use if your data consists of gait and non-gait periods)####
+gait_bouts = gaitpy.classify_bouts(result_file='/my/folder/classified_gait.h5')     # File to save results to (None by default)
+
+#### Extract gait characteristics ####
+gait_features = gaitpy.extract_features(subject_height,                               # Subject height
+                                        subject_height_units='centimeter',            # Units of subject height
+                                        result_file='/my/folder/gait_features.csv',   # File to save results to (None by default)
+                                        classified_gait=gait_bouts)                   # Pandas Dataframe or .h5 file results of classify_bouts function (None by default)
+
+#### Plot results of gait feature extraction ####
+gaitpy.plot_contacts(gait_features,                                     # Pandas Dataframe or .csv file results of extract_features function
+                     result_file='/my/folder/plot_contacts.html)',      # File to save results to (None by default)
+                     show_plot=True)                                    # Specify whether to display plot upon completion (True by default)
