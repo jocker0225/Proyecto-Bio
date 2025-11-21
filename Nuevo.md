@@ -1,2 +1,0 @@
-### *DEFINICIÓN DE TÉRMINOS CLAVES*
- 
