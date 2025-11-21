@@ -1,1 +1,63 @@
+#include <NimBLEDevice.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
+Adafruit_MPU6050 mpu;
+
+// UUID del servicio y característica BLE
+#define SERVICE_UUID        "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+#define CHARACTERISTIC_UUID "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+
+NimBLECharacteristic *txCharacteristic;
+
+unsigned long lastSend = 0;
+const int sampleRate = 128;          // 128 Hz
+const int sampleInterval = 1000 / 128;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Inicializar IMU
+  if (!mpu.begin()) {
+    while (1) Serial.println("Error iniciando MPU6050");
+  }
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  // BLE
+  NimBLEDevice::init("ESP32_GaitSensor");
+  NimBLEServer *server = NimBLEDevice::createServer();
+  NimBLEService *service = server->createService(SERVICE_UUID);
+  txCharacteristic =
+      service->createCharacteristic(CHARACTERISTIC_UUID,
+                                    NIMBLE_PROPERTY::NOTIFY);
+
+  service->start();
+  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
+  advertising->addServiceUUID(SERVICE_UUID);
+  advertising->start();
+}
+
+void loop() {
+  if (millis() - lastSend >= sampleInterval) {
+    lastSend = millis();
+
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+
+    // ACC vertical según colocación del sensor: aquí uso eje Y
+    float acc_y = a.acceleration.y;  // m/s^2
+
+    // timestamp en milisegundos
+    unsigned long ts = millis();
+
+    // Formato: "timestamp,acc_y"
+    char buffer[32];
+    sprintf(buffer, "%lu,%.3f", ts, acc_y);
+
+    txCharacteristic->setValue((uint8_t *)buffer, strlen(buffer));
+    txCharacteristic->notify();
+  }
+}
 
