@@ -1,3 +1,30 @@
+✅ Arduino IDE (versión clásica o 2.x)
+1. Abrir el Gestor de Librerías
+
+Ve al menú: Herramientas → Administrar bibliotecas…
+(o presiona Ctrl+Shift+I)
+
+2. Instalar “Adafruit MPU6050”
+
+En la barra de búsqueda escribe: Adafruit MPU6050
+
+Selecciónala y pulsa Instalar
+
+3. Instalar “Adafruit Unified Sensor”
+
+En el mismo buscador escribe: Adafruit Unified Sensor
+
+Instálala (te puede aparecer como Adafruit Unified Sensor Driver)
+
+4. Instalar “NimBLE-Arduino”
+
+Busca NimBLE-Arduino
+
+Selecciónala → Instalar
+
+¡Listo! Con eso ya tienes todas las librerías.
+
+
 #include <NimBLEDevice.h>
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
