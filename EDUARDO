@@ -24,7 +24,7 @@ const int ECHO_RIGHT = 18;
 const int FSR_PIN       = 34;
 const int FSR_THRESHOLD = 800;
 
-const int BUTTON_PIN = 25;   // botón entre GPIO 25 y GND
+const int BUTTON_PIN = 15;   // botón entre GPIO 25 y GND
 
 // -----------------------------
 // Variables IMU
