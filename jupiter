@@ -1,0 +1,70 @@
+%matplotlib inline
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+
+# Cargar CSV
+raw_data = 'datos_esp32.csv'
+df = pd.read_csv(raw_data)
+
+v_acc_col = 'y'
+ts_col = 'timestamps'
+df['time_s'] = df[ts_col] / 1000.0
+
+# Detectar picos (pasos)
+peaks, properties = find_peaks(df[v_acc_col], height=0.5, distance=50)
+peak_times = df['time_s'].iloc[peaks].values
+peak_values = df[v_acc_col].iloc[peaks].values
+
+# Calcular métricas básicas
+step_intervals = np.diff(peak_times)
+num_steps = len(peaks)
+total_time_s = df['time_s'].iloc[-1] - df['time_s'].iloc[0]
+cadence = (num_steps / total_time_s) * 60
+subject_height_m = 1.70
+step_length = subject_height_m * 0.415
+instant_speed = step_length / step_intervals
+
+# Crear figura con subplots
+fig, axs = plt.subplots(2, 2, figsize=(14,8))
+fig.suptitle("Dashboard de Marcha", fontsize=16)
+
+# 1️⃣ Señal de aceleración con pasos
+axs[0,0].plot(df['time_s'], df[v_acc_col], label='Aceleración vertical')
+axs[0,0].plot(peak_times, peak_values, "rx", label='Pasos detectados')
+axs[0,0].set_xlabel('Tiempo (s)')
+axs[0,0].set_ylabel('Aceleración (m/s²)')
+axs[0,0].set_title('Señal de aceleración')
+axs[0,0].legend()
+axs[0,0].grid(True)
+
+# 2️⃣ Intervalos entre pasos
+axs[0,1].plot(peak_times[1:], step_intervals, marker='o', color='orange')
+axs[0,1].set_xlabel('Tiempo (s)')
+axs[0,1].set_ylabel('Intervalo entre pasos (s)')
+axs[0,1].set_title('Intervalos entre pasos')
+axs[0,1].grid(True)
+
+# 3️⃣ Histograma de amplitudes de pasos
+axs[1,0].hist(peak_values, bins=10, color='green', edgecolor='black')
+axs[1,0].set_xlabel('Amplitud (m/s²)')
+axs[1,0].set_ylabel('Frecuencia')
+axs[1,0].set_title('Distribución amplitud de pasos')
+axs[1,0].grid(True)
+
+# 4️⃣ Velocidad estimada por paso
+axs[1,1].plot(peak_times[1:], instant_speed, marker='o', color='purple')
+axs[1,1].set_xlabel('Tiempo (s)')
+axs[1,1].set_ylabel('Velocidad (m/s)')
+axs[1,1].set_title('Velocidad estimada por paso')
+axs[1,1].grid(True)
+
+plt.tight_layout(rect=[0, 0, 1, 0.96])
+plt.show()
+
+# Mostrar métricas resumidas
+print(f"Número aproximado de pasos: {num_steps}")
+print(f"Cadencia aproximada: {cadence:.1f} pasos/min")
+print(f"Longitud de paso estimada: {step_length:.2f} m")
+print(f"Velocidad promedio aproximada: {np.mean(instant_speed):.2f} m/s")
