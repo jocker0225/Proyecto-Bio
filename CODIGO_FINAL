@@ -1,0 +1,418 @@
+#include <Wire.h>
+#include <MPU6050.h>
+#include <math.h>
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#include "BluetoothSerial.h"
+BluetoothSerial BT;
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+MPU6050 mpu;
+
+// -----------------------------
+// Pines – según tu hardware
+// -----------------------------
+const int TRIG_FRONT = 17;
+const int ECHO_FRONT = 19;
+
+const int TRIG_RIGHT = 5;
+const int ECHO_RIGHT = 18;
+
+const int FSR_PIN       = 34;
+const int FSR_THRESHOLD = 800;
+
+const int BUTTON_PIN = 25;   // botón entre GPIO 25 y GND
+
+// -----------------------------
+// Variables IMU
+// -----------------------------
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
+
+unsigned long prevMicros = 0;
+
+// Ángulos
+float angleZ     = 0.0f;   // ángulo relativo por paso
+float offsetZ    = 0.0f;
+float totalAngle = 0.0f;   // ángulo acumulado
+
+// Datos de registro
+unsigned long stepCount = 0;
+bool lastFsrPressed = false;
+
+const float DEADBAND_BASE  = 3.0f;
+const float MAX_STEP_ANGLE = 60.0f;
+
+// -----------------------------
+// Métricas
+// -----------------------------
+float sumAbsAngles = 0.0f;
+
+// -----------------------------
+// Control de estados
+// -----------------------------
+bool registrando = false;
+bool resumenMostrado = false;
+
+unsigned long startMillis = 0;
+
+// -----------------------------
+// Botón debounce
+// -----------------------------
+int lastButtonReading   = HIGH;
+int buttonStateStable   = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long DEBOUNCE_DELAY = 50;
+
+// -------------------------------------------------
+// Ultrasonido
+// -------------------------------------------------
+float medirDistanciaCM(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duracion = pulseIn(echoPin, HIGH, 30000);
+
+  if (duracion == 0) return -1.0f;
+
+  float distancia = duracion * 0.0343f / 2.0f;
+  return distancia;
+}
+
+// -------------------------------------------------
+// PANTALLAS OLED
+// -------------------------------------------------
+void mostrarEsperando() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0,0);
+  display.println("ESPERANDO BOTON");
+  display.println("PARA REGISTRAR");
+  display.display();
+}
+
+void mostrarEnRegistroOLED(unsigned long pasos, float avgDev, float cadencePPM) {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.setCursor(0,0);
+  display.println("ANALISIS DE MARCHA");
+
+  display.setCursor(0,16);
+  display.print("PASOS: ");
+  display.println(pasos);
+
+  display.setCursor(0,32);
+  display.print("DESV. PROM: ");
+  display.print(avgDev,1);
+  display.println("°");
+
+  display.setCursor(0,48);
+  display.print("CADENCIA: ");
+  display.print(cadencePPM,1);
+  display.println(" PPM");
+
+  display.display();
+}
+
+void mostrarResumen(unsigned long pasos, float avgDev, float cadencePPM) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0,0);
+
+  display.println("RESUMEN DE LA MARCHA");
+  display.println("");
+
+  display.print("PASOS: ");
+  display.println(pasos);
+
+  display.print("DESV. PROM: ");
+  display.print(avgDev,1);
+  display.println("°");
+
+  display.print("CADENCIA: ");
+  display.print(cadencePPM,1);
+  display.println(" PPM");
+
+  display.println("");
+  display.println("Presione boton");
+  display.println("para reiniciar");
+
+  display.display();
+}
+
+// -------------------------------------------------
+// RESET GENERAL
+// -------------------------------------------------
+void resetearTodo() {
+  registrando      = false;
+  resumenMostrado  = false;
+
+  stepCount        = 0;
+  angleZ           = 0.0f;
+  totalAngle       = 0.0f;
+  sumAbsAngles     = 0.0f;
+
+  lastFsrPressed   = false;
+
+  mostrarEsperando();
+}
+
+// -------------------------------------------------
+// SETUP
+// -------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  BT.begin("ESP32_GAIT"); // Nombre que aparecera en Android
+  Serial.println("Bluetooth listo!");
+
+  pinMode(TRIG_FRONT, OUTPUT);
+  pinMode(ECHO_FRONT, INPUT);
+
+  pinMode(TRIG_RIGHT, OUTPUT);
+  pinMode(ECHO_RIGHT, INPUT);
+
+  pinMode(FSR_PIN, INPUT);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  Wire.begin(21,22);
+
+  // OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("ERROR: OLED no encontrado");
+    while (1);
+  }
+  display.setTextColor(SSD1306_WHITE);
+  mostrarEsperando();
+
+  // IMU
+  mpu.initialize();
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 no detectado");
+    while(1);
+  }
+
+  // Calibración Z
+  Serial.println("Calibrando giroscopio Z (no mover)...");
+  long sum = 0;
+  for (int i=0; i<500; i++) {
+    mpu.getRotation(&gx,&gy,&gz);
+    sum += gz;
+    delay(3);
+  }
+  offsetZ = sum / 500.0f;
+  Serial.print("OffsetZ = ");
+  Serial.println(offsetZ);
+
+  prevMicros = micros();
+
+  Serial.println("Listo. ESPERANDO BOTON PARA REGISTRAR.");
+}
+
+// -------------------------------------------------
+// LOOP
+// -------------------------------------------------
+void loop() {
+
+  // --------------------------
+  // LECTURA DEL BOTON
+  // --------------------------
+  int reading = digitalRead(BUTTON_PIN);
+
+  if (reading != lastButtonReading) {
+    lastDebounceTime = millis();
+  }
+
+    // ---- CONTROL DESDE BLUETOOTH ----
+  if (BT.available()) {
+    String cmd = BT.readStringUntil('\n');
+
+    cmd.trim();
+
+    if (cmd == "START") {
+      registrando = true;
+      startMillis = millis();
+      Serial.println(">>> REGISTRO INICIADO (BT) <<<");
+      BT.println("OK START");
+    }
+
+    if (cmd == "STOP") {
+      registrando = false;
+      Serial.println(">>> REGISTRO FINALIZADO (BT) <<<");
+      BT.println("OK STOP");
+    }
+  }
+
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    if (reading != buttonStateStable) {
+      buttonStateStable = reading;
+
+      if (buttonStateStable == LOW) {
+
+        // ----- Caso 1: Estaba en resumen → RESETEAR -----
+        if (resumenMostrado) {
+          resetearTodo();
+          return;
+        }
+
+        // ----- Caso 2: Iniciar registro -----
+        if (!registrando) {
+          registrando = true;
+          stepCount = 0;
+          sumAbsAngles = 0.0f;
+          angleZ = 0.0f;
+          totalAngle = 0.0f;
+          lastFsrPressed = false;
+
+          startMillis = millis();
+          prevMicros = micros();
+
+          Serial.println(">>> REGISTRO INICIADO <<<");
+          // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+          // INICIO DEL ENVÍO BLUETOOTH
+          BT.println("INICIO_REGISTRO");
+          // ---------- ENVÍO POR BLUETOOTH ------------
+          unsigned long timestamp = millis();
+          BT.print(timestamp);
+          BT.print(",");
+          BT.println(ay);
+          // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        } 
+        // ----- Caso 3: Finalizar registro -----
+        else {
+          registrando = false;
+          resumenMostrado = true;
+
+          float tiempo_s = (millis() - startMillis) / 1000.0f;
+
+          float avgDev = (stepCount > 0) ? sumAbsAngles / stepCount : 0;
+          float cadencePPM = (tiempo_s > 0) ? (stepCount / tiempo_s) * 60.0f : 0;
+
+          mostrarResumen(stepCount, avgDev, cadencePPM);
+
+          Serial.println(">>> REGISTRO FINALIZADO <<<");
+          Serial.print("Pasos totales: ");
+          Serial.println(stepCount);
+          Serial.print("Desv. promedio (deg): ");
+          Serial.println(avgDev);
+          Serial.print("Cadencia (PPM): ");
+          Serial.println(cadencePPM);
+
+          // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+          // FIN DEL ENVÍO BLUETOOTH
+          BT.println("FIN_REGISTRO");
+          // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        }
+      }
+    }
+  }
+
+  lastButtonReading = reading;
+
+  // --------------------------
+  // Si no estamos registrando → salir
+  // --------------------------
+  if (!registrando) {
+    delay(5);
+    return;
+  }
+
+  // --------------------------
+  // DT
+  // --------------------------
+  unsigned long nowMicros = micros();
+  float dt = (nowMicros - prevMicros) / 1000000.0f;
+  prevMicros = nowMicros;
+
+  // --------------------------
+  // IMU
+  // --------------------------
+  mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
+
+  unsigned long timestamp = millis();
+  BT.print(timestamp);
+  BT.print(",");
+  BT.println(ay);
+
+  float rateZ = (gz - offsetZ) / 131.0f;
+  float absRateZ = fabs(rateZ);
+
+  // --------------------------
+  // FSR
+  // --------------------------
+  int fsrValue = analogRead(FSR_PIN);
+  bool fsrPressed = (fsrValue > FSR_THRESHOLD);
+
+  // --------------------------
+  // Integración del giro
+  // --------------------------
+  if (!fsrPressed) {
+    if (absRateZ < DEADBAND_BASE) rateZ = 0.0f;
+
+    angleZ += rateZ * dt;
+    angleZ = constrain(angleZ, -MAX_STEP_ANGLE, MAX_STEP_ANGLE);
+  }
+
+  // --------------------------
+  // DETECCION DE PASO
+  // --------------------------
+  if (fsrPressed && !lastFsrPressed) {
+
+    stepCount++;
+
+    float stepAngle = angleZ;
+    totalAngle += stepAngle;
+    sumAbsAngles += fabs(stepAngle);
+
+    // Medir ultrasonidos en el momento del apoyo
+    float d_front_raw = medirDistanciaCM(TRIG_FRONT, ECHO_FRONT); // cm
+    float d_right_raw = medirDistanciaCM(TRIG_RIGHT, ECHO_RIGHT); // cm
+
+    // LOG COMPLETO POR SERIAL
+    Serial.println("========= PASO DETECTADO =========");
+    Serial.print("Paso N°: ");
+    Serial.println(stepCount);
+
+    Serial.print("Ángulo en este paso (deg): ");
+    Serial.println(stepAngle);
+
+    Serial.print("Ángulo acumulado (deg): ");
+    Serial.println(totalAngle);
+
+    Serial.print("Distancia FRENTE (cm): ");
+    Serial.println(d_front_raw);
+
+    Serial.print("Distancia DERECHA (cm): ");
+    Serial.println(d_right_raw);
+
+    Serial.println("==================================");
+
+    // ---- ACTUALIZAR OLED CON LAS 3 METRICAS ----
+    float avgDev = (stepCount > 0) ? sumAbsAngles / stepCount : 0.0f;
+    float tiempo_s = (millis() - startMillis) / 1000.0f;
+    float cadencePPM = (tiempo_s > 0.0f) ? (stepCount / tiempo_s) * 60.0f : 0.0f;
+
+    mostrarEnRegistroOLED(stepCount, avgDev, cadencePPM);
+    // --------------------------------------------
+
+    // Reset ángulo relativo para el siguiente paso
+    angleZ = 0.0f;
+  }
+
+  lastFsrPressed = fsrPressed;
+
+  delay(5);
+}
