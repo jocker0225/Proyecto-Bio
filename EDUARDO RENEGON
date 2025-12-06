@@ -1,0 +1,297 @@
+#include <Wire.h>
+#include <MPU6050.h>
+#include <math.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "BluetoothSerial.h"
+
+BluetoothSerial SerialBT;
+
+// ---------------- OLED ----------------
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ---------------- Sensores ----------------
+MPU6050 mpu;
+
+const int TRIG_FRONT = 17;
+const int ECHO_FRONT = 19;
+
+const int TRIG_RIGHT = 5;
+const int ECHO_RIGHT = 18;
+
+const int FSR_PIN = 34;
+const int BUTTON_PIN = 15;
+
+// -------- FSR ultrasensible --------
+int fsrBaseline = 0;
+const int FSR_MARGIN = 3;
+
+// -------- IMU --------
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
+
+float angleZ = 0.0f;
+float offsetZ = 0.0f;
+float totalAngle = 0.0f;
+
+unsigned long prevMicros = 0;
+const float DEADBAND_BASE = 3.0f;
+const float MAX_STEP_ANGLE = 60.0f;
+
+// -------- Métricas --------
+unsigned long stepCount = 0;
+bool lastFsrPressed = false;
+
+float sumAbsAngles = 0.0f;
+unsigned long startMillis = 0;
+
+// -------- Control --------
+bool registrando = false;
+bool resumenMostrado = false;
+
+// -------- Botón debounce --------
+int lastButtonReading = HIGH;
+int buttonStable = HIGH;
+unsigned long lastDebounce = 0;
+const unsigned long DEBOUNCE_DELAY = 50;
+
+
+// --------------------------------------
+// OLED PANTALLAS
+//---------------------------------------
+void mostrarEsperando() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0,0);
+  display.println("ESPERANDO BOTON");
+  display.println("PARA REGISTRAR");
+  display.display();
+}
+
+void mostrarRegistrando() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0,0);
+  display.println("REGISTRANDO MARCHA");
+  display.println("");
+  display.println("Pise el FSR");
+  display.println("para detectar pasos");
+  display.display();
+}
+
+void mostrarEnRegistroOLED(unsigned long pasos, float avgDev, float cadence) {
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  display.setCursor(0,0);
+  display.println("ANALISIS DE MARCHA");
+
+  display.setCursor(0,16);
+  display.print("PASOS: ");
+  display.println(pasos);
+
+  display.setCursor(0,32);
+  display.print("DESV PROM: ");
+  display.print(avgDev,1);
+  display.println("°");
+
+  display.setCursor(0,48);
+  display.print("CADENCIA: ");
+  display.print(cadence,1);
+  display.println(" PPM");
+
+  display.display();
+}
+
+void mostrarResumen(unsigned long pasos, float avgDev, float cadence) {
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  display.setCursor(0,0);
+  display.println("RESUMEN DE LA MARCHA");
+  display.println("");
+
+  display.print("PASOS: ");
+  display.println(pasos);
+
+  display.print("DESV PROM: ");
+  display.print(avgDev,1);
+  display.println("°");
+
+  display.print("CADENCIA: ");
+  display.print(cadence,1);
+  display.println(" PPM");
+
+  display.println("");
+  display.println("Presione boton");
+  display.println("para reiniciar");
+
+  display.display();
+}
+
+
+// ------------------ ULTRASONIDO ------------------
+float medirDistancia(int trig, int echo) {
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+
+  long dur = pulseIn(echo, HIGH, 30000);
+  if (dur == 0) return -1;
+
+  return (dur * 0.0343f / 2.0f);
+}
+
+
+// ---------------- RESET ----------------
+void resetear() {
+  registrando = false;
+  resumenMostrado = false;
+
+  stepCount = 0;
+  angleZ = 0.0f;
+  totalAngle = 0.0f;
+  sumAbsAngles = 0.0f;
+  lastFsrPressed = false;
+
+  mostrarEsperando();
+}
+
+
+// ---------------- SETUP ----------------
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("ESP32_GAIT");
+
+  pinMode(TRIG_FRONT, OUTPUT);
+  pinMode(ECHO_FRONT, INPUT);
+  pinMode(TRIG_RIGHT, OUTPUT);
+  pinMode(ECHO_RIGHT, INPUT);
+
+  pinMode(FSR_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  Wire.begin(21,22);
+
+  // OLED
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.setTextColor(SSD1306_WHITE);
+  mostrarEsperando();
+
+  // IMU
+  mpu.initialize();
+  delay(500);
+
+  // Calibración Z
+  long s = 0;
+  for (int i=0; i<500; i++) {
+    mpu.getRotation(&gx,&gy,&gz);
+    s += gz;
+    delay(3);
+  }
+  offsetZ = s / 500.0f;
+
+  // Autocalibración FSR
+  int suma = 0;
+  for (int i=0; i<200; i++) {
+    suma += analogRead(FSR_PIN);
+    delay(5);
+  }
+  fsrBaseline = suma / 200;
+
+  prevMicros = micros();
+}
+
+
+// ---------------- LOOP ----------------
+void loop() {
+
+  // ---------- BOTÓN ----------
+  int readBtn = digitalRead(BUTTON_PIN);
+
+  if (readBtn != lastButtonReading)
+    lastDebounce = millis();
+
+  if (millis() - lastDebounce > DEBOUNCE_DELAY) {
+    if (readBtn != buttonStable) {
+      buttonStable = readBtn;
+
+      if (buttonStable == LOW) {
+
+        if (resumenMostrado) { resetear(); return; }
+
+        if (!registrando) {
+          registrando = true;
+          stepCount = 0;
+          sumAbsAngles = 0;
+          angleZ = 0;
+          totalAngle = 0;
+          startMillis = millis();
+
+          mostrarRegistrando();
+        }
+        else {
+          registrando = false;
+          resumenMostrado = true;
+
+          float tiempoS = (millis() - startMillis) / 1000.0f;
+          float avgDev = (stepCount > 0) ? sumAbsAngles / stepCount : 0;
+          float cadencia = (tiempoS > 0) ? (stepCount / tiempoS) * 60.0f : 0;
+
+          mostrarResumen(stepCount, avgDev, cadencia);
+        }
+      }
+    }
+  }
+
+  lastButtonReading = readBtn;
+
+  if (!registrando) return;
+
+  // ---------- DT ----------
+  unsigned long now = micros();
+  float dt = (now - prevMicros) / 1e6;
+  prevMicros = now;
+
+  // ---------- IMU ----------
+  mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
+  
+
+  float rateZ = (gz - offsetZ) / 131.0f;
+  if (abs(rateZ) < DEADBAND_BASE) rateZ = 0;
+
+  // ---------- FSR ----------
+  int fsrValue = analogRead(FSR_PIN);
+  bool fsrPressed = (fsrValue > fsrBaseline + FSR_MARGIN);
+
+  if (!fsrPressed) {
+    angleZ += rateZ * dt;
+    angleZ = constrain(angleZ, -MAX_STEP_ANGLE, MAX_STEP_ANGLE);
+  }
+
+  // ---------- DETECCIÓN DE PASO ----------
+  if (fsrPressed && !lastFsrPressed) {
+
+    stepCount++;
+
+    float stepAng = angleZ;
+    totalAngle += stepAng;
+    sumAbsAngles += abs(stepAng);
+
+    float avgDev = sumAbsAngles / stepCount;
+    float tiempo = (millis() - startMillis) / 1000.0f;
+    float cadence = (tiempo > 0) ? (stepCount / tiempo) * 60.0f : 0;
+
+    mostrarEnRegistroOLED(stepCount, avgDev, cadence);
+
+    angleZ = 0.0f;
+  }
+
+  lastFsrPressed = fsrPressed;
+
+  delay(5);
+}
